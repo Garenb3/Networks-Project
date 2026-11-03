@@ -1,29 +1,34 @@
 import json
 
 
-Register = "register",
-Join = "join",
-Error = "error",
-Quit = "quit",
-Score = "score",
-Answer = "answer",
-Ack = "ack",
+Register = "register"
+Join = "join"
+Error = "error"
+Quit = "quit"
+Score = "score"
+Answer = "answer"
+Ack = "ack"
 Countdown = "countdown"
 
-delimeter = "b\n"
+Delimiter = b"\n"
 
 
 def encode(message: dict) -> bytes:
-    return json.dumps(message, separators=(",", ":")).encode() + delimeter
+    return json.dumps(message, separators=(",", ":")).encode() + Delimiter
 
 
 def decode(message: bytes) -> dict:
     try:
-        decoded = json.load(message)
-    except json.JSONDecodeError as e:
-        print(f"JSON conversion error: {e}")
+        decoded = json.loads(message.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise ValueError(f"Decoding error: {e}")
+    if not isinstance(decoded, dict):
+        raise ValueError("Message must be a JSON object")
     if "type" not in decoded.keys():
         raise ValueError("Type missing from request")
+    if not isinstance(decoded.get("type"), str):
+        raise ValueError("Type must be a string")
+    return decoded
 
 
 class MessageReader:
@@ -33,10 +38,10 @@ class MessageReader:
         self.buffer = b""
 
     def read(self):
-        while delimeter not in self.buffer:
-            chunk = self.socket.recv(self.buffer_size)
+        while Delimiter not in self.buffer:
+            chunk = self.sock.recv(self.buffer_size)
             if not chunk:
-                break
+                return None
             self.buffer += chunk
-        line, self.buffer = self.buffer.split(delimeter, 1)
-        return line.decode()
+        line, self.buffer = self.buffer.split(Delimiter, 1)
+        return decode(line)
