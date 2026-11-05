@@ -1,4 +1,13 @@
 
+"""
+Concurrent client test for the Live Quiz Arena project.
+
+Creates multiple simulated clients that connect to the server
+at approximately the same time. Each client registers using TCP
+and provides its UDP port. The test reports successful and failed
+registrations and closes all client sockets afterward.
+"""
+
 import argparse
 import socket
 import threading
@@ -9,32 +18,47 @@ DEFAULT_SERVER_PORT = 5555
 
 
 class SimulatedClient:
+    """Represent a client used for testing server registration."""
 
-    # Prepare a simulated client with its own TCP and UDP sockets.
-    def __init__(self, host, port, name):
+    def __init__(self, host: str, port: int, name: str) -> None:
+        """
+        Prepare a simulated client.
+
+        Args:
+            host: IP address or hostname of the server.
+            port: TCP port used by the server.
+            name: Username of the simulated client.
+        """
         self.host = host
         self.port = port
         self.name = name
 
-        self.tcp_socket = None
-        self.udp_socket = None
-        self.client_id = None
+        self.tcp_socket: socket.socket | None = None
+        self.udp_socket: socket.socket | None = None
+        self.client_id: str | None = None
 
-    # Connect to the server and check whether registration succeeds.
-    def connect_and_register(self):
+    def connect_and_register(self) -> str:
+        """
+        Connect to the server and request client registration.
+
+        The UDP socket is bound first so its port can be included
+        in the TCP registration message.
+
+        Returns:
+            The client ID assigned by the server.
+
+        Raises:
+            OSError: If a socket operation or connection fails.
+            ConnectionError: If registration fails or the server
+                              sends an unexpected response.
+        """
         self.udp_socket = socket.socket(
-            socket.AF_INET,
-            socket.SOCK_DGRAM
-        )
-
+            socket.AF_INET, socket.SOCK_DGRAM)
         self.udp_socket.bind(("0.0.0.0", 0))
         udp_port = self.udp_socket.getsockname()[1]
 
         self.tcp_socket = socket.socket(
-            socket.AF_INET,
-            socket.SOCK_STREAM
-        )
-
+            socket.AF_INET, socket.SOCK_STREAM)
         self.tcp_socket.settimeout(5)
         self.tcp_socket.connect((self.host, self.port))
 
@@ -53,66 +77,77 @@ class SimulatedClient:
 
         if response.get("type") == P.Error:
             raise ConnectionError(
-                response.get("reason", "Registration failed.")
-            )
+                response.get("reason", "Registration failed."))
 
-        if (
-            response.get("type") != P.Ack
-            or response.get("for") != "register"
-        ):
-            raise ConnectionError(
-                "Unexpected server response."
-            )
+        if (response.get("type") != P.Ack
+                or response.get("for") != P.Register):
+            raise ConnectionError("Unexpected server response.")
 
-        self.client_id = response.get("client_id")
+        client_id = response.get("client_id")
 
-        if not self.client_id:
-            raise ConnectionError("No client ID received.")
+        if not isinstance(client_id, str) or not client_id:
+            raise ConnectionError("No valid client ID received.")
 
-        return self.client_id
+        self.client_id = client_id
+        return client_id
 
-    # Tell the server that the client is leaving and close its sockets.
-    def close(self):
-        if self.tcp_socket:
+    def close(self) -> None:
+        """
+        Notify the server that the client is leaving and close its sockets.
+
+        Socket cleanup is performed even if sending the quit message
+        fails or registration was unsuccessful.
+        """
+        if self.tcp_socket is not None:
             try:
-                self.tcp_socket.sendall(
-                    P.encode({"type": P.Quit})
-                )
+                self.tcp_socket.sendall(P.encode({"type": P.Quit}))
             except OSError:
                 pass
 
-            self.tcp_socket.close()
+            try:
+                self.tcp_socket.close()
+            except OSError:
+                pass
 
-        if self.udp_socket:
-            self.udp_socket.close()
+        if self.udp_socket is not None:
+            try:
+                self.udp_socket.close()
+            except OSError:
+                pass
 
 
-# Run several clients at the same time and count successful registrations.
-def run_test(host, port, client_count):
+def run_test(host: str, port: int, client_count: int) -> None:
+    """
+    Run several simulated clients concurrently.
+
+    A barrier makes all worker threads wait until they are ready
+    before attempting to connect to the server.
+
+    Args:
+        host: IP address or hostname of the server.
+        port: TCP port used by the server.
+        client_count: Number of clients to simulate.
+    """
     barrier = threading.Barrier(client_count)
 
-    results = []
+    results: list[bool] = []
     results_lock = threading.Lock()
 
-    def client_worker(number):
-        client = SimulatedClient(
-            host,
-            port,
-            f"TestClient{number}"
-        )
+    def client_worker(number: int) -> None:
+        """Connect, register, and close one simulated client."""
+        client = SimulatedClient(host, port, f"TestClient{number}")
 
         try:
-            barrier.wait()
+            barrier.wait(timeout=10)
 
             client_id = client.connect_and_register()
 
-            print(
-                f"[SUCCESS] Client {number} registered. ID: {client_id}"
-            )
+            print(f"[SUCCESS] Client {number} registered. ID: {client_id}")
 
             with results_lock:
                 results.append(True)
 
+            # Keep the connection open briefly to test concurrency.
             threading.Event().wait(3)
 
         except Exception as e:
@@ -127,10 +162,7 @@ def run_test(host, port, client_count):
     threads = []
 
     for i in range(client_count):
-        thread = threading.Thread(
-            target=client_worker,
-            args=(i + 1,)
-        )
+        thread = threading.Thread(target=client_worker, args=(i + 1,))
 
         threads.append(thread)
         thread.start()
@@ -148,37 +180,18 @@ def run_test(host, port, client_count):
     print("==================================")
 
 
-# Read the test settings and start the multi-client test.
-def main():
+def main() -> None:
+    """Read command-line arguments and start the concurrent test."""
     parser = argparse.ArgumentParser()
-
-    parser.add_argument(
-        "--host",
-        required=True
-    )
-
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=DEFAULT_SERVER_PORT
-    )
-
-    parser.add_argument(
-        "--clients",
-        type=int,
-        default=15
-    )
-
+    parser.add_argument("--host", required=True, help="Server IP address")
+    parser.add_argument("--port", type=int, default=DEFAULT_SERVER_PORT)
+    parser.add_argument("--clients", type=int, default=15)
     args = parser.parse_args()
 
     if args.clients < 1:
         parser.error("--clients must be at least 1")
 
-    run_test(
-        args.host,
-        args.port,
-        args.clients
-    )
+    run_test(args.host, args.port, args.clients)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,18 @@
 
+"""
+Client for the Live Quiz Arena project.
+
+Connects to the quiz server using TCP and UDP. TCP is used for
+registration and reliable communication, while UDP is used to
+receive lightweight updates such as question countdowns.
+
+Separate threads listen for incoming TCP and UDP messages.
+"""
+
 import argparse
 import socket
 import threading
+from typing import Any
 import protocol as P
 
 
@@ -10,87 +21,135 @@ UDP_BUFFER_SIZE = 2048
 
 
 class QuizClient:
+    """Manage the client's sockets and communication with the server."""
 
-    # Set up the client and prepare its sockets and connection details.
-    def __init__(self, server_host, server_port, name):
+    def __init__(self, server_host: str, server_port: int,
+                 name: str) -> None:
+        """
+        Prepare a client with its server details and communication state.
+
+        Args:
+            server_host: IP address or hostname of the server.
+            server_port: TCP port used by the server.
+            name: Username chosen by the client.
+        """
         self.server_host = server_host
         self.server_port = server_port
         self.name = name
 
-        self.tcp_socket = None
-        self.udp_socket = None
-        self.reader = None
+        self.tcp_socket: socket.socket | None = None
+        self.udp_socket: socket.socket | None = None
+        self.reader: P.MessageReader | None = None
+        self.udp_port: int | None = None
 
-        self.client_id = None
+        self.client_id: str | None = None
         self.registered = False
         self.running = False
 
+        # Signals when registration succeeds, fails, or the connection closes.
         self.registration_event = threading.Event()
+
+        # Prevents multiple threads from writing to the TCP socket at once.
         self.send_lock = threading.Lock()
 
-    # Open the UDP and TCP sockets, then register with the server.
-    def connect(self):
-        self.udp_socket = socket.socket(
-            socket.AF_INET,
-            socket.SOCK_DGRAM
-        )
+    def connect(self) -> None:
+        """
+        Open the UDP and TCP sockets and register with the server.
 
-        self.udp_socket.bind(("0.0.0.0", 0))
-        self.udp_socket.settimeout(1)
+        The UDP socket is bound first so its port can be included
+        in the TCP registration request.
 
-        self.udp_port = self.udp_socket.getsockname()[1]
+        Raises:
+            OSError: If a socket operation or connection fails.
+            ConnectionError: If registration is rejected.
+            TimeoutError: If the server does not respond in time.
+        """
+        try:
+            self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.udp_socket.bind(("0.0.0.0", 0))
+            self.udp_socket.settimeout(1)
+            self.udp_port = self.udp_socket.getsockname()[1]
 
-        self.tcp_socket = socket.socket(
-            socket.AF_INET,
-            socket.SOCK_STREAM
-        )
+            self.tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-        self.tcp_socket.connect(
-            (self.server_host, self.server_port)
-        )
+            # Limit the time spent establishing the initial connection.
+            self.tcp_socket.settimeout(5)
+            self.tcp_socket.connect((self.server_host, self.server_port))
+            self.tcp_socket.settimeout(None)
 
-        self.reader = P.MessageReader(self.tcp_socket)
-        self.running = True
+            self.reader = P.MessageReader(self.tcp_socket)
+            self.running = True
 
-        threading.Thread(
-            target=self._tcp_receive_loop,
-            daemon=True
-        ).start()
+            threading.Thread(
+                target=self._tcp_receive_loop,
+                daemon=True
+            ).start()
 
-        threading.Thread(
-            target=self._udp_receive_loop,
-            daemon=True
-        ).start()
+            threading.Thread(
+                target=self._udp_receive_loop,
+                daemon=True
+            ).start()
 
-        self.send_tcp({
-            "type": P.Register,
-            "name": self.name,
-            "udp_port": self.udp_port
-        })
+            self.send_tcp({
+                "type": P.Register,
+                "name": self.name,
+                "udp_port": self.udp_port
+            })
 
-        self.wait_for_registration()
+            self.wait_for_registration()
 
-    # Send a message to the server using TCP.
-    def send_tcp(self, message):
+        except (OSError, ConnectionError, TimeoutError):
+            self.quit()
+            raise
+
+    def send_tcp(self, message: dict[str, Any]) -> None:
+        """
+        Send a message to the server over TCP.
+
+        Args:
+            message: The dictionary to encode and send.
+
+        Raises:
+            ConnectionError: If the TCP socket is unavailable.
+            OSError: If sending fails.
+        """
+        if self.tcp_socket is None:
+            raise ConnectionError("TCP connection is not available")
+
         with self.send_lock:
             self.tcp_socket.sendall(P.encode(message))
 
-    # Wait for the server to confirm that registration succeeded.
-    def wait_for_registration(self, timeout=5):
+    def wait_for_registration(self, timeout: float = 5) -> None:
+        """
+        Wait for the server to confirm client registration.
+
+        Args:
+            timeout: Maximum time to wait in seconds.
+
+        Raises:
+            TimeoutError: If no registration response is received.
+            ConnectionError: If registration fails.
+        """
         if not self.registration_event.wait(timeout):
-            raise TimeoutError(
-                "The server did not respond in time."
-            )
+            raise TimeoutError("The server did not respond in time.")
 
         if not self.registered:
             raise ConnectionError(
-                "The server did not register this client."
-            )
+                "The server did not register this client.")
 
-    # Keep listening for messages coming from the server.
-    def _tcp_receive_loop(self):
+    def _tcp_receive_loop(self) -> None:
+        """
+        Listen for messages sent by the server over TCP.
+
+        Acknowledgements confirm registration, while error messages
+        indicate that a request was rejected. Other messages are
+        printed until the quiz interface is integrated.
+        """
         try:
             while self.running:
+                if self.reader is None:
+                    break
+
                 message = self.reader.read()
 
                 if message is None:
@@ -99,27 +158,22 @@ class QuizClient:
                 msg_type = message.get("type")
 
                 if msg_type == P.Ack:
-                    if message.get("for") == "register":
+                    if message.get("for") == P.Register:
                         self.client_id = message.get("client_id")
                         self.registered = bool(self.client_id)
 
                         if self.registered:
-                            print(
-                                "\n[Server] Registration successful!"
-                            )
-                            print(
-                                f"[Server] Client ID: {self.client_id}"
-                            )
+                            print("\n[Server] Registration successful!")
+                            print(f"[Server] Client ID: {self.client_id}")
 
                         self.registration_event.set()
 
                 elif msg_type == P.Error:
                     print(
                         "\n[Server] Error:",
-                        message.get("reason", "Unknown error")
-                    )
-
+                        message.get("reason", "Unknown error"))
                     self.registration_event.set()
+                    break
 
                 else:
                     print("\n[Server] Received:", message)
@@ -132,17 +186,22 @@ class QuizClient:
             self.running = False
             self.registration_event.set()
 
-    # Listen for incoming UDP messages from the server.
-    def _udp_receive_loop(self):
+    def _udp_receive_loop(self) -> None:
+        """
+        Listen for incoming UDP datagrams from the server.
+
+        Each datagram contains one JSON message. UDP does not use
+        the TCP newline-based message framing.
+        """
         while self.running:
             try:
-                data, address = self.udp_socket.recvfrom(
-                    UDP_BUFFER_SIZE
-                )
+                if self.udp_socket is None:
+                    break
 
-                message = P.decode(data.rstrip(b"\n"))
+                data, address = self.udp_socket.recvfrom(UDP_BUFFER_SIZE)
 
-                print("\n[UDP] Received:", message)
+                message = P.decode(data)
+                print(f"\n[UDP] Received from {address}: {message}")
 
             except socket.timeout:
                 continue
@@ -152,27 +211,41 @@ class QuizClient:
                     print("\n[UDP] Error:", e)
                 break
 
-    # Send a quit message and close the client's sockets.
-    def quit(self):
+    def quit(self) -> None:
+        """
+        Notify the server that the client is leaving and close its sockets.
+
+        The sockets are closed even if sending the quit message fails.
+        """
         if self.running:
             try:
-                self.send_tcp({
-                    "type": P.Quit
-                })
+                self.send_tcp({"type": P.Quit})
             except OSError:
                 pass
 
         self.running = False
+        self.registration_event.set()
 
-        if self.udp_socket:
-            self.udp_socket.close()
+        if self.udp_socket is not None:
+            try:
+                self.udp_socket.close()
+            except OSError:
+                pass
 
-        if self.tcp_socket:
-            self.tcp_socket.close()
+        if self.tcp_socket is not None:
+            try:
+                self.tcp_socket.close()
+            except OSError:
+                pass
 
 
-# Start the client and keep it running until the user exits.
-def run_terminal(client):
+def run_terminal(client: QuizClient) -> None:
+    """
+    Connect the client and display the basic terminal menu.
+
+    Args:
+        client: The client instance to run.
+    """
     try:
         client.connect()
 
@@ -205,35 +278,16 @@ def run_terminal(client):
         client.quit()
 
 
-# Read the server details and start the client.
-def main():
+def main() -> None:
+    """Read command-line arguments and start the client."""
     parser = argparse.ArgumentParser()
 
-    parser.add_argument(
-        "--host",
-        required=True,
-        help="Server IP address"
-    )
-
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=DEFAULT_SERVER_PORT
-    )
-
-    parser.add_argument(
-        "--name",
-        default="anonymous"
-    )
-
+    parser.add_argument("--host", required=True, help="Server IP address")
+    parser.add_argument("--port", type=int, default=DEFAULT_SERVER_PORT)
+    parser.add_argument("--name", default="anonymous")
     args = parser.parse_args()
 
-    client = QuizClient(
-        args.host,
-        args.port,
-        args.name
-    )
-
+    client = QuizClient(args.host, args.port, args.name)
     run_terminal(client)
 
 
