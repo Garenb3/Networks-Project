@@ -2,6 +2,7 @@ import json
 
 
 Register = "register"
+Create = "create"
 Join = "join"
 Error = "error"
 Quit = "quit"
