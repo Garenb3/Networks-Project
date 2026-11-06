@@ -166,8 +166,6 @@ def tcp_process(message: dict[str, Any], connection: socket.socket,
         ValueError: If the message is invalid or unexpected.
     """
     msg_type = message["type"]
-    print(f"Got {msg_type}")
-
     if msg_type == P.Register:
         if cid is not None:
             raise ValueError("Client has already registered")
@@ -216,8 +214,8 @@ def tcp_process(message: dict[str, Any], connection: socket.socket,
         return cid, False
 
     # These operations will be connected during quiz integration.
-    if msg_type in (P.Create, P.Join, P.Answer, P.Score):
-        raise ValueError(f"Message type '{msg_type}' is not integrated yet")
+    if msg_type in (P.Create, P.Join, P.Answer, P.Score, P.start):
+        raise ValueError(f"Message type '{msg_type}' is not implemented yet")
 
     raise ValueError(f"Unknown message type: {msg_type}")
 

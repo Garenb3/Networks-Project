@@ -15,11 +15,13 @@ from typing import Any
 # Message types used by the client-server protocol.
 Register = "register"
 Create = "create"
+Start = "start"
 Join = "join"
 Error = "error"
 Quit = "quit"
 Score = "score"
 Answer = "answer"
+Question = "question"
 Ack = "ack"
 Countdown = "countdown"
 
